@@ -1,0 +1,10 @@
+.card {
+  height: 100%
+}
+
+a.no-focus:focus,
+a.no-focus:active {
+  outline: 0;
+  border: none;
+  -moz-outline-style: none;
+}
