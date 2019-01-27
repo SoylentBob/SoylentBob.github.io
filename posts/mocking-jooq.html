@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+	  <head>
+      <meta charset="utf-8">
+      <title>Mocking jOOQ - Batteries included</title>
+			<link rel="stylesheet" href="../bulma.min.css" />
+			<link rel="stylesheet" href="../custom-styles.css" />
+    </head>
+    <body>
+			<article>
+				<section class="hero is-bold is-primary section">
+				  <div class="hero-body">
+				    <div class="container">
+				      <h1 class="title">
+				        Mocking jOOQ
+				      </h1>
+				      <h2 class="subtitle">
+				        Batteries included
+				      </h2>
+				    </div>
+				  </div>
+				</section>
+
+				<section class="section">
+					<div class="container content">
+            <p>I love building applications that make use of <a href="https://github.com/jOOQ/jOOQ/">jOOQ</a> to integrate with a database, but to this day I have really disliked the experience of writing tests for the code that integrates with it.</p>
+            <h1 class="title">What is jOOQ?</h1>
+            <p>
+              jOOQ is a pretty great framework, that allows its users to write type safe SQL-Queries in good old Java.
+              I prefer using it over Hibernate or JPA, because of pretty much the same reasons that Yegor Bugayenko described in his blog post <a href="https://www.yegor256.com/2014/12/01/orm-offensive-anti-pattern.html">'ORM is an Offensive Anti-Pattern'</a>.
+              But I'm not going to go anywhere near the in's and out's of both frameworks in this post.
+            </p>
+            <p>
+              So then how do we use jOOQ to solve real world problems?
+            </p>
+            <p>
+              To fetch a specific book from our database we could write a plain SQL-statement like this:
+            </p>
+            <pre>select *
+from "BOOK"
+where "ID" = 1; // For obvious reasons we would not use select * in a production setup</pre>
+            <p>To achieve the same result using jOOQ we can write the statement like this:</p>
+            <pre>
+DSL.using(SQLDialect.H2)
+          .selectFrom(Tables.BOOK)
+          .where(Tables.BOOK.ID.eq(1));</pre>
+            <p>
+              This is pretty great whenever we want to have fine grained control over the way our applications interact with their databases.
+            </p>
+            <p>
+              But certainly we don't want to have complex SQL-statements or even more complex transactions that access or modify our business objects scattered throughout our application. That would be even worse than using Hibernate!
+            </p>
+            <p>So in comes the SQL-speaking objects pattern from the article on yegor256.com that I referenced earlier.</p>
+            <p>We create an interface called <i>Books</i> that describes how we want to access the books in our application. To stick with the example we saw earlier, we would expose a method called <i>fetchBookById</i> that takes an integer parameter and returns an <i>Optional</i> containing the book that we requested, or an empty Optional to indicate that there has not been an entry in the database with the supplied id.</p>
+            <p>This interface could look somewhat like this:</p>
+            <pre>
+public interface Books {
+    public Optional<Book> fetchBookById(Integer bookId);
+}</pre>
+            <p>Based on this interface we would implement a concrete class that retrieves books through SQL called <i>SqlBooks</i>.</p>
+            <pre>public class SqlBooks implements Books {
+
+    private final DSLContext sql;
+
+    public SqlBooks(final DSLContext sql) {
+        this.sql = requireNonNull(sql, "The SQL DSL may not be null");
+    }
+
+    @Override
+    public Optional<Book> fetchBookById(final Integer bookId) {
+
+        BookRecord record = sql.selectFrom(Tables.BOOK).where(Tables.BOOK.ID.eq(bookId)).fetchOne();
+
+        return Optional.ofNullable(record).map(v -> new SqlBook(sql, record));
+    }
+}</pre>
+            </p>
+            <p>
+              So by this point we might notice that books could be pretty important to the business domain of our application and, being professional developers, we might feel the urge to write a test right here, right now, just to make sure that our software will stay functional in the future.
+            </p>
+            <h1 class="title">Testing jOOQ based code</h1>
+            <p>
+              So whenever I start testing in a new project, I pull in two test dependencies, aside from jUnit.
+              Those are <a href="https://joel-costigliola.github.io/assertj/">AssertJ</a> and <a href="https://site.mockito.org/">Mockito</a>.
+              AssertJ allows me to write concise assertions in my tests, and Mockito allows me to mock the dependencies of my objects, and to inject specific, or even very special behavior, that might be hard to reproduce even in a production like environment.
+            </p>
+            <p>
+              jOOQ is pretty well designed, so we would have no issues in mocking the entirety of our interactions with it, but it would be very tedious and verbose to do so, and I bet that my employers could think of a better way to use my time, than mocking the jOOQ DSL over and over again, just to improve some weird code coverage metric that is displayed next to an even weirder cartoon butler.
+              But for science, we will have a look at how we could mock jOOQ with Mockito anyway.
+            </p>
+            <h2 class="title">Testing jOOQ based code with Mockito</h2>
+            <p>
+              Right now the code has two important branches.
+              We can either fetch a book that exists, or we can try to fetch a book that does not exist.
+              This means we have to consider two scenarios in the tests.
+            </p>
+            <pre>
+@Test
+public void existingBook() {
+    DSLContext sql = mock(DSLContext.class);
+    SelectWhereStep<BookRecord> selectWhereStep = mock(SelectWhereStep.class);
+    SelectConditionStep selectConditionStep = mock(SelectConditionStep.class);
+    BookRecord record = mock(BookRecord.class);
+
+    when(sql.selectFrom(Tables.BOOK)).thenReturn(selectWhereStep);
+    when(selectWhereStep.where(Tables.BOOK.ID.eq(1))).thenReturn(selectConditionStep);
+    when(selectConditionStep.fetchOne()).thenReturn(record);
+
+    assertThat(new SqlBooks(sql).fetchBookById(1)).isPresent();
+}
+
+@Test
+public void nonExistentBook() {
+    DSLContext sql = mock(DSLContext.class);
+    SelectWhereStep<BookRecord> selectWhereStep = mock(SelectWhereStep.class);
+    SelectConditionStep selectConditionStep = mock(SelectConditionStep.class);
+
+    when(sql.selectFrom(Tables.BOOK)).thenReturn(selectWhereStep);
+    when(selectWhereStep.where(Tables.BOOK.ID.eq(1))).thenReturn(selectConditionStep);
+    when(selectConditionStep.fetchOne()).thenReturn(null);
+
+    assertThat(new SqlBooks(sql).fetchBookById(1)).isNotPresent();
+}</pre>
+            <p>
+              So this doesn't look too bad, but it does not look too good either.
+              Steve Freeman and Nat Pryce did not add the phrase "Only Mock Types That You Own" to their book 'Growing Object-Oriented Software Guided By Tests' without a reason.
+            </p>
+            <p>
+              By introducing this code we have just introduced a lot of coupling.
+              Yes, unit tests also add coupling to our overall system.
+              Instead of using the code only in our productive part of the application, we now have two places that we need to keep up to date, and to make things even worse, we have just manifested a lot of assumptions about jOOQs internals and we need to do this in every single test that will follow this one over and over again.
+            </p>
+            <p>
+              All of the mocked interfaces and method calls are implementation details of the underlying framework, that we do not own.
+            </p>
+            <p>
+              Therefor they should not be present in our test cases.
+              They even affect our ability to comprehend the tests.
+              Whenever I revisit the test case I now have to juggle a lot of nouns and their specific relationships in my mind, and none of them plays a significant role in our business domain.
+            </p>
+            <p>
+              What is a <i>SelectConditionStep</i> anyway, and why would I need to know when I'm trying to identify a critical bug in our applications business logic?
+            </p>
+            <p>
+              So at this point I think we can be certain, that this is not the pattern, that we want to use to test our jOOQ based code.
+            </p>
+            <p>But what alternatives are there?</p>
+            <p>
+              We could swap out our database server for an in-memory database like H2 or SQLite, but that would let change the scope of our unit test and would become a integration test.
+              Those are important aswell, but we want to find most of the errors in our application, as soon as possible.
+            </p>
+            <p>
+              Luckily jOOQ provides us with a few convenience classes, that ease setting up an in-memory fake of our real database using a <i>MockDataProvider</i>.
+              We could even feed data from structured files into the MockDataProvider, but we wont get into this in this post.
+            </p>
+
+            <h2 class="title">Testing jOOQ based code with MockDataProvider</h2>
+
+            <p>
+              So according to jOOQs documentation a MockDataProvider can be used to mock query executions.
+            </p>
+            <p>
+              That sounds just like what we've been searching for!
+            </p>
+            <p>
+              So how can we rewrite our previous tests using this magical MockDataProvider?
+            </p>
+            <p>
+              The MockDataProvider interface exposes a single method called <i>execute</i>.
+              This method receives a parameter of the type <i>MockDataExecuteContext</i> and returns an Array of <i>MockDataResult</i>s
+            </p>
+            <p>
+              Alternatively, we could also write this as a lambda, but I had the feeling, that giving the MockDataProvider a meaningful name, would help people reading the test understand them more easily.
+              In order to utilize this interface we would have to add a special implementation of this interface to each of our tests, that handles the SQL queries used by our tests.
+            </p>
+            <pre>
+private static class NonExistentBookDataProvider implements MockDataProvider {
+
+    @Override
+    public MockResult[] execute(MockExecuteContext ctx) throws SQLException {
+        return new MockResult[]{new MockResult(0, DSL.using(SQLDialect.H2).newResult(Tables.BOOK))};
+    }
+}
+
+@Test
+public void nonExistentBook() {
+    DSLContext sql = DSL.using(new MockConnection(new NonExistentBookDataProvider()), SQLDialect.H2);
+
+    assertThat(new SqlBooks(sql)
+            .fetchBookById(1)).isNotPresent();
+}
+
+private static class ExistingBookDataProvider implements MockDataProvider {
+
+    @Override
+    public MockResult[] execute(MockExecuteContext ctx) throws SQLException {
+        return new MockResult[]{new MockResult(new BookRecord())};
+    }
+}
+
+@Test
+public void existingBook() {
+    DSLContext sql = DSL.using(new MockConnection(new ExistingBookDataProvider()), SQLDialect.H2);
+
+    assertThat(new SqlBooks(sql)
+            .fetchBookById(1)).isPresent();
+}</pre>
+            <p>
+              These tests would be enough to get our tests passing, but we would not be able to detect regressions based on them.
+              If a developer on your team made an error and commited a weird change to mainline, that he used to run against his local development database and the <i>SqlBooks#fetchBookById</i> method has been abused for that case like this:
+            </p>
+            <pre>
+@Override
+public Optional<Book> fetchBookById(final Integer bookId) {
+
+    sql.delete(Tables.BOOK).execute();
+
+    BookRecord record = sql.selectFrom(Tables.BOOK).where(Tables.BOOK.ID.eq(bookId)).fetchOne();
+
+    return Optional.ofNullable(record).map(v -> new SqlBook(sql, record));
+}</pre>
+          <p>
+            Then this change might be delivered to a production system using continous delivery and we're suddenly in a huge mess.
+            So how can we detect these unwanted statements in our tests?
+          </p>
+
+          <p>
+            The parameter that is passed to the MockDataProviders execute method can be used to handle the different cases that the mock data provider should provide meaningful answers to.
+            This can be achieved by inspecting the executed query.
+            We can then adjust our implementation to check the incoming SQL-query, before we answer it, and throw a SQLException in case of an unexpected SQL-statement.
+          </p>
+          <pre>
+private static class NonExistentBookDataProvider implements MockDataProvider {
+
+    @Override
+    public MockResult[] execute(MockExecuteContext ctx) throws SQLException {
+
+        if("select \"PUBLIC\".\"BOOK\".\"ID\", \"PUBLIC\".\"BOOK\".\"AUTHOR_ID\", \"PUBLIC\".\"BOOK\".\"CO_AUTHOR_ID\", \"PUBLIC\".\"BOOK\".\"DETAILS_ID\", \"PUBLIC\".\"BOOK\".\"TITLE\", \"PUBLIC\".\"BOOK\".\"PUBLISHED_IN\", \"PUBLIC\".\"BOOK\".\"LANGUAGE_ID\", \"PUBLIC\".\"BOOK\".\"CONTENT_TEXT\", \"PUBLIC\".\"BOOK\".\"CONTENT_PDF\", \"PUBLIC\".\"BOOK\".\"REC_VERSION\", \"PUBLIC\".\"BOOK\".\"REC_TIMESTAMP\" from \"PUBLIC\".\"BOOK\" where \"PUBLIC\".\"BOOK\".\"ID\" = cast(? as int)\n".equals(ctx.sql())) {
+            return new MockResult[]{new MockResult(0, DSL.using(SQLDialect.H2).newResult(Tables.BOOK))};
+        }
+
+        throw new SQLException("Unexpected SQL statement");
+    }
+}
+
+@Test
+public void nonExistentBookMockDataProvider() {
+    DSLContext sql = DSL.using(new MockConnection(new NonExistentBookDataProvider()), SQLDialect.H2);
+
+    assertThat(new SqlBooks(sql)
+            .fetchBookById(1)).isNotPresent();
+}
+
+private static class ExistingBookDataProvider implements MockDataProvider {
+
+    @Override
+    public MockResult[] execute(MockExecuteContext ctx) throws SQLException {
+        if("select \"PUBLIC\".\"BOOK\".\"ID\", \"PUBLIC\".\"BOOK\".\"AUTHOR_ID\", \"PUBLIC\".\"BOOK\".\"CO_AUTHOR_ID\", \"PUBLIC\".\"BOOK\".\"DETAILS_ID\", \"PUBLIC\".\"BOOK\".\"TITLE\", \"PUBLIC\".\"BOOK\".\"PUBLISHED_IN\", \"PUBLIC\".\"BOOK\".\"LANGUAGE_ID\", \"PUBLIC\".\"BOOK\".\"CONTENT_TEXT\", \"PUBLIC\".\"BOOK\".\"CONTENT_PDF\", \"PUBLIC\".\"BOOK\".\"REC_VERSION\", \"PUBLIC\".\"BOOK\".\"REC_TIMESTAMP\" from \"PUBLIC\".\"BOOK\" where \"PUBLIC\".\"BOOK\".\"ID\" = cast(? as int)\n".equals(ctx.sql())) {
+            return new MockResult[]{new MockResult(new BookRecord())};
+        }
+        throw new SQLException("Unexpected SQL statement");
+    }
+}
+
+@Test
+public void existingBookMockDataProvider() {
+    DSLContext sql = DSL.using(new MockConnection(new ExistingBookDataProvider()), SQLDialect.H2);
+
+    assertThat(new SqlBooks(sql)
+            .fetchBookById(1)).isPresent();
+}</pre>
+            <p>
+              So this would at least detect the error that has been introduced by our colleague, but is this really better than the previous approach using jOOQ?
+            </p>
+            <p>
+              Not really.
+            </p>
+            <p>
+              Although it removes the complexity that we introduced in our previous tests, having to maintain the plain text SQL-statements in our test suite seems to be pretty prone to errors, especially when database schema changes are introduced.
+              Also this would become more and more unreadable as the database transactions become more complex.
+            </p>
+            <p>
+              The official documentation of jOOQ also contains the following warning to users of the MockDataProvider:
+            </p>
+            <blockquote>
+               "Disclaimer: The general idea of mocking a JDBC connection with this jOOQ API is to provide quick workarounds, injection points, etc. using a very simple JDBC abstraction. It is NOT RECOMMENDED to emulate an entire database (including complex state transitions, transactions, locking, etc.) using this mock API. Once you have this requirement, please consider using an actual database instead for integration testing, rather than implementing your test database inside of a MockDataProvider."<br/><br/>
+               - <a href="https://www.jooq.org/doc/3.9/manual/tools/jdbc-mocking/">JDBC Mocking for unit testing</a>
+            </blockquote>
+            <p>
+              *Sad face*
+            </p>
+            <p>
+              So we're still going against the grain.
+              But I'm kind of getting the feeling that we can get rid of most of the issues around the MockDataProvider by simply adding a few utility classes to construct new instances more easily.
+            </p>
+            <p>
+              Yes, I do get the reasoning for <a href="https://twitter.com/lukaseder/status/861985012090064896">jOOQ developers not wanting you to put too much emphasis on unit testing</a>, but I feel like they just have a different view on how to properly test database interactions, because they just have to operate on an entirely different level than most of us application developers.
+            </p>
+
+            <h2 class="title">Testing jOOQ based code with jooq-mock</h2>
+
+            <p>
+              The journey, that I just shared with you, led me to think about what I felt was missing in jOOQ itself, and how I could go start extending it's functionality to write tests more efficiently.
+            </p>
+
+            <p>
+              The goals that I wanted to achieve by writing <a href="https://github.com/SoylentBob/jooq-mock">jooq-mock</a> were:
+            </p>
+
+            <ol>
+              <li>My tests should stay concise, even when they are not trivial</li>
+              <li>My tests should not have to rely on jOOQs internals</li>
+              <li>Writing tests with it should be just as easy as writing a test with Mockito</li>
+              <li>I want to be able to chain the setup of my mock data, e.g. when writing tests with <a href="https://cucumber.io/">Cucumber</a></li>
+              <li>I should not have to reinvent the wheel to achieve any of these goals</li>
+            </ol>
+
+            <p>
+              So the first thing that came to my mind when I started writing the library was to just implement a special <i>DSLContext</i>, but after I wrote the code to extend a new class with that interface, I quickly discarded the idea to keep complexity at bay.
+            </p>
+
+            <p>
+              Instead of this I went for implementing a common <i>MockDSLDataProvider</i>.
+              Hardcoding the strings and adding if-branches to handle each case may not have been a good idea, but if there only was a decent java framework that's pretty good at building SQL-statements...
+            </p>
+            <p>
+              Oh yeah right... jOOQ is already pretty good at doing that!
+            </p>
+            <p>
+              To make things as easy as Mockito I followed the pattern of having both a <i>when</i> and <i>then</i> method.
+              The when method handles registering the query, and the when method associates a result with it.
+              The MockDSLDataProvider stores these queries and results in a simple <i>HashMap</i> right now, but that might change in the future as the library progresses.
+            </p>
+            <p>
+              Then I added a (too simple) fluent builder aka the <i>MockDSLBuilder</i> that can be used to chain the setup of our tests, and make sure that we get the correct results for our queries and build the necessary DSLContext from our MockDataProvider.
+            </p>
+            <p>
+              So how do our tests look like now?
+            </p>
+            <pre>
+@Test
+public void existingBook() {
+
+    DSLContext sql = new MockDSLBuilder(SQLDialect.H2)
+            .when(DSL.using(SQLDialect.H2)
+                    .selectFrom(Tables.BOOK)
+                    .where(Tables.BOOK.ID.eq(1)))
+            .thenReturn(new BookRecord())
+            .context();
+
+    assertThat(new SqlBooks(sql)
+            .fetchBookById(1)).isPresent();
+}
+
+@Test
+public void nonExistentBook() {
+
+    DSLContext sql = new MockDSLBuilder(SQLDialect.H2)
+            .when(DSL.using(SQLDialect.H2)
+                    .selectFrom(Tables.BOOK)
+                    .where(Tables.BOOK.ID.eq(1)))
+            .thenReturnNothingFor(Tables.BOOK)
+            .context();
+
+    assertThat(new SqlBooks(sql).fetchBookById(1)).isNotPresent();
+}
+            </pre>
+            <h1 class="title">Conclusion</h1>
+            <p>
+              In just about 40 lines of actual code jooq-mock addresses most of the issues I ran into time and time again during the last couple of years, while I have been developing and maintaining jOOQ based apps.
+            </p>
+            <p>
+              From the goals that I defined I would currently say that the library has already achieved them from point two to five.
+              As to the first goal, only time will tell if this is suited to maintain code on a larger scale, but I have a good feeling that I can pull this off.
+            </p>
+            <p>
+              What do you think about it? <a href="https://github.com/SoylentBob/jooq-mock/issues/new">Just open a new issue on the project page on github</a> and tell me what you think.
+            </p>
+					</div>
+				</section>
+			</article>
+
+			<footer class="footer">
+			  <div class="content has-text-centered">
+			    <p>
+            Written by <a href="https://github.com/SoylentBob/">SoylentBob</a>
+			    </p>
+			  </div>
+			</footer>
+    </body>
+</html>
